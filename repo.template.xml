@@ -9,6 +9,7 @@
       <title lang="EN">TVH</title>
       <url>https://tvh.codechimp.org/tvh-{{ env['PACKAGEVERSION'] }}.zip</url>
       <link>https://tvh.codechimp.org</link>
+      <icon>https://tvh.codechimp.org/icon.png</icon>
       <sha>{{ env['SHA'] }}</sha>
       <creator>CodeChimp</creator>
     </plugin>
