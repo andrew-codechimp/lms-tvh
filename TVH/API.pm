@@ -45,6 +45,18 @@ sub getEpg {
 	_call("/api/epg/events/grid?limit=1&channel=${channel}", $cb);
 }
 
+# Current + upcoming programmes for one channel (sorted/filtered by the caller)
+sub getEpgForChannel {
+	my ($class, $cb, $channel) = @_;
+	_call("/api/epg/events/grid?limit=10&sort=start&dir=ASC&channel=${channel}", $cb);
+}
+
+# What's on now across every channel, in a single request (used for browse menus)
+sub getEpgNow {
+	my ($class, $cb) = @_;
+	_call('/api/epg/events/grid?mode=now&limit=2000', $cb);
+}
+
 sub _call {
 	my ( $url, $cb, $params ) = @_;
 

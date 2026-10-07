@@ -11,6 +11,8 @@ use Slim::Utils::Prefs;
 use Plugins::TVH::API;
 use Plugins::TVH::Settings;
 use Plugins::TVH::Prefs;
+use Plugins::TVH::EPG;
+use Slim::Formats::RemoteMetadata;
 
 use LWP::Simple;
 
@@ -38,6 +40,12 @@ sub initPlugin {
 		port => '9981',
 		stationsorting => 'NAME',
 	});
+
+	# Add EPG now/next info to TVHeadend streams without changing how they play
+	Slim::Formats::RemoteMetadata->registerProvider(
+		match => qr{/stream/channel/},
+		func  => \&Plugins::TVH::EPG::metadataProvider,
+	);
 
 	$class->SUPER::initPlugin(
 		feed   => \&handleFeed,
@@ -145,43 +153,76 @@ sub getStationsByTag {
 	Plugins::TVH::API->getStations(sub {
 		my ($stations) = @_;
 
-		my $items = _renderStations($stations, $tagUuid);
-
-		if ($prefs->get('stationsorting') eq 'NAME') {
-			@$items = sort {$a->{name} cmp $b->{name}} @$items;
-		}
-		else {
-			@$items = sort {$a->{line2} <=> $b->{line2}} @$items;
+		if (ref $stations ne 'ARRAY') {
+			$cb->({ items => [{ name => 'Could not reach TVHeadend', type => 'text' }] });
+			return;
 		}
 
-		$cb->({
-			items => $items
+		# One extra request gets "what's on now" for every channel
+		Plugins::TVH::API->getEpgNow(sub {
+			my ($events) = @_;
+
+			my %nowOn;
+			if (ref $events eq 'ARRAY') {
+				my $now = time();
+				for my $e (@$events) {
+					next unless $e->{channelUuid} && $e->{title};
+					next if $e->{start} && $e->{start} > $now;
+					next if $e->{stop}  && $e->{stop}  <= $now;
+					$nowOn{ $e->{channelUuid} } = $e;
+				}
+			}
+
+			my $items = _renderStations($stations, $tagUuid, \%nowOn);
+
+			if ($prefs->get('stationsorting') eq 'NAME') {
+				@$items = sort { lc($a->{name}) cmp lc($b->{name}) } @$items;
+			}
+			else {
+				@$items = sort { ($a->{_number} || 0) <=> ($b->{_number} || 0) } @$items;
+			}
+
+			delete $_->{_number} for @$items;
+
+			$cb->({
+				items => $items
+			});
 		});
 	});
 }
 
 sub _renderStations {
-	my ($stations, $tag) = @_;
+	my ($stations, $tag, $nowOn) = @_;
+	$nowOn ||= {};
 
 	my $items = [];
 
 	for my $station (@$stations) {
-		my (@tags) = $station->{tags};
+		my $tags = $station->{tags};
+		next unless ref $tags eq 'ARRAY' && grep { $_ eq $tag } @$tags;
 
-		for my $row (@tags) {
-			for my $element (@$row) { 
-				if ($element eq $tag) {
-					push @$items, {
-						name => $station->{name},
-						line1 => $station->{name},
-						line2 => $station->{number},
-						type => 'audio',
-						image => _getStationImage($station->{icon_public_url}),  
-						url => Plugins::TVH::Prefs::getApiUrl() . 'stream/channel/' . $station->{uuid} . Plugins::TVH::Prefs::getProfile()
-					}
-				}
-			}
-		}
+		my $uuid  = $station->{uuid};
+		my $image = _getStationImage($station->{icon_public_url});
+
+		# Remember name/logo so the player can show them while playing
+		Plugins::TVH::EPG->setChannelInfo($uuid, {
+			name   => $station->{name},
+			number => $station->{number},
+			icon   => $image,
+		});
+
+		my $prog = $nowOn->{$uuid};
+		my $line2 = $prog ? 'Now: ' . $prog->{title} : ($station->{number} ? 'Channel ' . $station->{number} : '');
+
+		push @$items, {
+			name    => $station->{name},
+			line1   => $station->{name},
+			line2   => $line2,
+			_number => $station->{number},
+			type    => 'audio',
+			image   => $image,
+			url     => Plugins::TVH::EPG->streamUrlFor($uuid),
+		};
 	}
 
 	return $items;
@@ -207,16 +248,21 @@ sub _renderStations {
 # 	return $items;
 # }
 
+# Logo URLs are checked once and remembered, so big station lists don't
+# stall LMS by re-checking every logo on every visit.
+my %imageCache;
+
 sub _getStationImage {
-	my $image = Plugins::TVH::Prefs::getApiUrlNoAuth() . "$_[0]";
+	my ($path) = @_;
+	return 'plugins/TVH/html/images/radio.png' unless $path;
 
-	if (head("$image")) {
-		return "$image";
-	}
-	else {
-		return "plugins/TVH/html/images/radio.png";
+	my $image = Plugins::TVH::Prefs::getApiUrlNoAuth() . $path;
+
+	if (!exists $imageCache{$image}) {
+		$imageCache{$image} = head($image) ? $image : 'plugins/TVH/html/images/radio.png';
 	}
 
+	return $imageCache{$image};
 }
 
 1;
